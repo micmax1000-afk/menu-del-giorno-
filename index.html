@@ -199,6 +199,24 @@
     let markers = [];
     let soloPreferiti = false;
 
+    // Parsing date compatibile con Google Sheets e Safari
+    function parseGoogleDate(ts) {
+      if (!ts) return null;
+      const parts = ts.split(" ");
+      const date = parts[0].split("/");
+      const time = parts[1]?.split(":") || ["00", "00", "00"];
+
+      const giorno = parseInt(date[0]);
+      const mese = parseInt(date[1]) - 1;
+      const anno = parseInt(date[2]);
+
+      const ore = parseInt(time[0]);
+      const min = parseInt(time[1]);
+      const sec = parseInt(time[2]);
+
+      return new Date(anno, mese, giorno, ore, min, sec);
+    }
+
     // Inizializza mappa
     function initMap() {
       map = L.map("map").setView([45.4468, 8.6212], 13); // Default Novara
@@ -239,7 +257,6 @@
           timestamp: r.Timestamp || "",
         }));
 
-        // Filtra ristoranti senza menù
         ristoranti = ristoranti.filter(
           (r) => r.primi.length || r.secondi.length
         );
@@ -265,8 +282,8 @@
       }
       const oggi = new Date().toDateString();
       const aggiornatiOggi = ristoranti.some((r) => {
-        if (!r.timestamp) return false;
-        const d = new Date(r.timestamp);
+        const d = parseGoogleDate(r.timestamp);
+        if (!d) return false;
         return d.toDateString() === oggi;
       });
 
@@ -325,10 +342,8 @@
       let lista = ristoranti.filter((r) => {
         const matchNome = r.nome.toLowerCase().includes(search);
         const matchPrezzo = r.prezzo_fisso <= maxPrice;
-        const matchOggi = !onlyToday
-          ? true
-          : r.timestamp &&
-            new Date(r.timestamp).toDateString() === oggi;
+        const d = parseGoogleDate(r.timestamp);
+        const matchOggi = !onlyToday ? true : d && d.toDateString() === oggi;
         return matchNome && matchPrezzo && matchOggi;
       });
 
@@ -339,19 +354,22 @@
       mostraRistoranti(lista);
     }
 
-    // Condivisione WhatsApp
-    function condividiWhatsApp(r) {
+    // Condivisione WhatsApp (corretta)
+    function condividiWhatsApp(id) {
+      const r = ristoranti.find((x) => x.id === id);
+      if (!r) return;
+
       const testo =
-        `🍽️ *Menù del giorno: ${r.nome}* (€${r.prezzo_fisso.toFixed(2)})\n` +
-        `📍 ${r.indirizzo}\n\n` +
-        `🥣 *Primi:* ${r.primi.join(", ") || "Nessuno"}\n` +
-        `🥩 *Secondi:* ${r.secondi.join(", ") || "Nessuno"}\n\n` +
-        (r.note ? `📝 *Note:* ${r.note}\n\n` : "") +
-        `Organizziamo la pausa pranzo qui? 👇`;
-      const urlWhatsApp =
-        "https://api.whatsapp.com/send?text=" +
-        encodeURIComponent(testo);
-      window.open(urlWhatsApp, "_blank");
+`🍽️ ${r.nome}
+💶 €${r.prezzo_fisso.toFixed(2)}
+🥣 ${r.primi.join(", ") || "Nessun primo"}
+🥩 ${r.secondi.join(", ") || "Nessun secondo"}
+📍 ${r.indirizzo}`;
+
+      window.open(
+        "https://api.whatsapp.com/send?text=" + encodeURIComponent(testo),
+        "_blank"
+      );
     }
 
     // Render schede + marker
@@ -372,7 +390,6 @@
         .map((r) => {
           const isPreferito = prefList.includes(r.id);
 
-          // Marker sulla mappa (solo se lat/lng validi)
           if (r.lat && r.lng) {
             const markerIcon = isPreferito
               ? L.circleMarker([r.lat, r.lng], {
@@ -391,18 +408,18 @@
             markers.push(markerIcon);
           }
 
-          // Badge aggiornato oggi
           let badgeAgg = "";
           if (r.timestamp) {
-            const oggi = new Date().toDateString();
-            const d = new Date(r.timestamp);
-            badgeAgg =
-              d.toDateString() === oggi
-                ? '<span class="inline-block bg-green-100 text-green-800 text-xs px-2 py-0.5 rounded ml-2">✅ Menù aggiornato oggi</span>'
-                : `<span class="inline-block bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded ml-2">⏱ ${d.toLocaleDateString()}</span>`;
+            const d = parseGoogleDate(r.timestamp);
+            if (d) {
+              const oggi = new Date().toDateString();
+              badgeAgg =
+                d.toDateString() === oggi
+                  ? '<span class="inline-block bg-green-100 text-green-800 text-xs px-2 py-0.5 rounded ml-2">✅ Menù aggiornato oggi</span>'
+                  : `<span class="inline-block bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded ml-2">⏱ ${d.toLocaleDateString()}</span>`;
+            }
           }
 
-          // Foto menù
           const fotoHtml = r.foto
             ? `
               <div class="mt-3">
@@ -484,7 +501,7 @@
                   🧭 Indicazioni Stradali
                 </a>
                 <button
-                  onclick="condividiWhatsApp(r)"
+                  onclick="condividiWhatsApp('${r.id}')"
                   class="bg-emerald-500 text-white px-3 py-1.5 rounded-lg font-semibold hover:bg-emerald-600 transition flex items-center gap-1"
                 >
                   💬 Condividi su WhatsApp
@@ -574,13 +591,4 @@
         setTimeout(() => {
           const btn = document.getElementById("salva-temp");
           if (!btn) return;
-          btn.onclick = () => {
-            const nome = document
-              .getElementById("nome-temp")
-              .value.trim();
-            const indirizzo = document
-              .getElementById("indirizzo-temp")
-              .value.trim();
-            const prezzo =
-              parseFloat(
-                document.getEl
+          btn.on
