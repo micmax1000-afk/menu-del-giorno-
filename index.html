@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pranzi di Lavoro Vicini</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    #map { height: 250px; width: 100%; border-radius: 0.75rem; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen p-4">
+  <div class="max-w-3xl mx-auto space-y-4 pb-10">
+
+    <!-- Header -->
+    <header class="flex justify-between items-center">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-800">Pranzi di Lavoro Vicini</h1>
+        <p class="text-xs text-gray-500">Menù del giorno aggiornati dai ristoratori via Google Form</p>
+      </div>
+    </header>
+
+    <!-- Mappa -->
+    <div id="map" class="shadow-md"></div>
+
+    <!-- Controlli -->
+    <div class="flex flex-wrap gap-2 mt-2">
+      <button onclick="trovaPosizione()" class="flex-1 bg-blue-600 text-white py-2 rounded-lg font-semibold hover:bg-blue-700 transition text-sm">
+        📍 Vicini a me
+      </button>
+      <button onclick="toggleMostraSoloPreferiti()" id="btn-preferiti" class="bg-amber-500 text-white px-4 py-2 rounded-lg font-semibold hover:bg-amber-600 transition text-sm">
+        ⭐ Preferiti (<span id="count-pref">0</span>)
+      </button>
+    </div>
+
+    <!-- Filtri -->
+    <div class="flex flex-wrap gap-2 mt-2 text-xs">
+      <input id="search-input" class="flex-1 border rounded px-2 py-1" placeholder="🔍 Cerca ristorante...">
+      <input id="max-price-input" type="number" step="0.5" class="w-32 border rounded px-2 py-1" placeholder="€ max">
+      <label class="flex items-center gap-1">
+        <input id="only-today-input" type="checkbox">
+        <span>Aggiornati oggi</span>
+      </label>
+    </div>
+
+    <!-- Badge globale -->
+    <div id="badge-globale" class="text-center text-xs text-gray-600"></div>
+
+    <!-- Loader -->
+    <div id="loader" class="text-center text-sm text-gray-500 py-4 hidden">
+      ⏳ Caricamento menù...
+    </div>
+
+    <!-- Lista Ristoranti -->
+    <div id="lista-ristoranti" class="space-y-4"></div>
+
+  </div>
+
+  <script>
+    const GOOGLE_SHEET_URL = "https://opensheet.elk.sh/ID_DEL_FOGLIO/Risposte+del+modulo+1"; // <-- sostituisci
+    let map, userMarker, ristoranti = [];
+    let markers = [];
+    let soloPreferiti = false;
+
+    function initMap() {
+      map = L.map('map').setView([45.4468, 8.6212], 13);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+      caricaDati();
+      setInterval(caricaDati, 5 * 60 * 1000); // refresh ogni 5 minuti
+    }
+
+    async function caricaDati() {
+      document.getElementById("loader").classList.remove("hidden");
+      try {
+        const res = await fetch(GOOGLE_SHEET_URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const dati = await res.json();
+
+        ristoranti = dati.map(r => ({
+          id: (r.Ristorante || "").replace(/\s+/g, "_").toLowerCase(),
+          nome: r.Ristorante || "Senza nome",
+          primi: r.Primi ? r.Primi.split(",").map(p => p.trim()).filter(Boolean) : [],
+          secondi: r.Secondi ? r.Secondi.split(",").map(s => s.trim()).filter(Boolean) : [],
+          prezzo_fisso: parseFloat(r.Prezzo) || 0,
+          indirizzo: r.Indirizzo || "Indirizzo non specificato",
+          lat: parseFloat(r.Lat) || null,
+          lng: parseFloat(r.Lng) || null,
+          foto: r.Foto || "",
+          note: r.Note || "",
+          timestamp: r.Timestamp || ""
+        });
+
+        ristoranti = ristoranti.filter(r => r.primi.length || r.secondi.length);
+        aggiornaBadgeGlobale();
+        aggiornaContatorePreferiti();
+        applicaFiltriERender();
+      } catch (e) {
+        console.error(e);
+        document.getElementById("lista-ristoranti").innerHTML =
+          `<p class="text-center text-red-600 py-4">Errore nel caricamento. Riprova più tardi.</p>`;
+      } finally {
+        document.getElementById("loader").classList.add("hidden");
+      }
+    }
+
+    function aggiornaBadgeGlobale() {
+      const badge = document.getElementById("badge-globale");
+      if (!ristoranti.length) { badge.textContent = ""; return; }
+      const oggi = new Date().toDateString();
+      const aggiornatiOggi = ristoranti.some(r => {
+        if (!r.timestamp) return false;
+        const d = new Date(r.timestamp);
+        return d.toDateString() === oggi;
+      });
+      badge.innerHTML = aggiornatiOggi
+        ? `<span class="inline-block bg-green-100 text-green-800 px-3 py-1 rounded-full">✅ Menù aggiornati oggi</span>`
+        : `<span class="inline-block bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full">⚠️ Nessun menù risulta aggiornato oggi</span>`;
+    }
+
+    function getPreferiti() {
+      const pref = localStorage.getItem('ristoranti_preferiti');
+      return pref ? JSON.parse(pref) : [];
+    }
+
+    function togglePreferito(id) {
+      let pref = getPreferiti();
+      pref = pref.includes(id) ? pref.filter(p => p !== id) : [...pref, id];
+      localStorage.setItem('ristoranti_preferiti', JSON.stringify(pref));
+      aggiornaContatorePreferiti();
+      applicaFiltriERender();
+    }
+
+    function aggiornaContatorePreferiti() {
+      const pref = getPreferiti();
+      document.getElementById('count-pref').innerText = pref.length;
+      const btn = document.getElementById('btn-preferiti');
+      soloPreferiti ? btn.classList.add('ring-4', 'ring-amber-300') : btn.classList.remove('ring-4', 'ring-amber-300');
+    }
+
+    function toggleMostraSoloPreferiti() {
+      soloPreferiti = !soloPreferiti;
+      aggiornaContatorePreferiti();
+      applicaFiltriERender();
+    }
+
+    function applicaFiltriERender() {
+      const search = document.getElementById("search-input").value.toLowerCase();
+      const maxPrice = parseFloat(document.getElementById("max-price-input").value) || Infinity;
+      const onlyToday = document.getElementById("only-today-input").checked;
+      const pref = getPreferiti();
+
+      const oggi = new Date().toDateString();
+
+      let lista = ristoranti.filter(r =>
+        r.nome.toLowerCase().includes(search) &&
+        r.prezzo_fisso <= maxPrice &&
+        (!onlyToday ? true : (r.timestamp && new Date(r.timestamp).toDateString() === oggi))
+      );
+
+      if (soloPreferiti) lista = lista.filter(r => pref.includes(r.id));
+
+      mostraRistoranti(lista);
+    }
+
+    function condividiWhatsApp(r) {
+      const testo =
+        `🍽️ *Menù del giorno: ${r.nome}* (€${r.prezzo_fisso.toFixed(2)})\n` +
+        `📍 ${r.indirizzo}\n\n` +
+        `🥣 *Primi:* ${r.primi.join(', ') || 'Nessuno'}\n` +
+        `🥩 *Secondi:* ${r.secondi.join(', ') || 'Nessuno'}\n\n` +
+        (r.note ? `📝 *Note:* ${r.note}\n\n` : '') +
+        `Organizziamo la pausa pranzo qui? 👇`;
+      const urlWhatsApp = `https://api.whatsapp.com/send?text=${encodeURIComponent(testo)}`;
+      window.open(urlWhatsApp, '_blank');
+    }
+
+    function mostraRistoranti(lista) {
+      const container = document.getElementById('lista-ristoranti');
+      const prefList = getPreferiti();
+
+      markers.forEach(m => map.removeLayer(m));
+      markers.length = 0;
+
+      if (!lista.length) {
+        container.innerHTML = `<p class="text-center text-gray-500 py-6">Nessun ristorante trovato.</p>`;
+        return;
+      }
+
+      container.innerHTML = lista.map(r => {
+        const isPreferito = prefList.includes(r.id);
+
+        if (r.lat && r.lng) {
+          const markerIcon = isPreferito
+            ? L.circleMarker([r.lat, r.lng], { color: 'gold', fillColor: '#facc15', fillOpacity: 0.9, radius: 9 })
+            : L.marker([r.lat, r.lng]);
+          markerIcon.addTo(map).bindPopup(`<b>${r.nome}</b><br>€${r.prezzo_fisso.toFixed(2)}`);
+          markers.push(markerIcon);
+        }
+
+        let badgeAgg = '';
+        if (r.timestamp) {
+          const oggi = new Date().toDateString();
+          const d = new Date(r.timestamp);
+          badgeAgg = d.toDateString() === oggi
+            ? `<span class="inline-block bg-green-100 text-green-800 text-xs px-2 py-0.5 rounded ml-2">✅ Menù aggiornato oggi</span>`
+            : `<span class="inline-block bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded ml-2">⏱ ${d.toLocaleDateString()}</span>`;
+        }
+
+        const fotoHtml = r.foto
+          ? `<div class="mt-3">
+               <img src="${r.foto}" alt="Foto menù del giorno"
+                    class="w-full rounded-lg border border-gray-200 max-h-48 object-cover"
+                    loading="lazy" decoding="async">
+             </div>`
+          : '';
+
+        return `
+          <div class="bg-white p-5 rounded-xl shadow-md border-l-4 ${isPreferito ? 'border-amber-500' : 'border-blue-600'}">
+            <div class="flex justify-between items-start">
+              <div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <h2 class="text-xl font-bold text-gray-900">${r.nome}</h2>
+                  <button onclick="togglePreferito('${r.id}')"
+                          class="text-2xl focus:outline-none transition transform hover:scale-110"
+                          title="Aggiungi ai preferiti">
+                    ${isPreferito ? '⭐' : '☆'}
+                  </button>
+                  ${badgeAgg}
+                </div>
+                <p class="text-sm text-gray-500">${r.indirizzo}</p>
+              </div>
+              <span class="bg-green-100 text-green-800 font-bold text-lg px-3 py-1 rounded-lg">
+                €${r.prezzo_fisso.toFixed(2)}
+              </span>
+            </div>
+
+            <div class="mt-3 text-sm text-gray-600">
+              <p><strong class="text-gray-700">Primi:</strong> ${r.primi.join(', ') || 'Nessuno'}</p>
+              <p class="mt-1"><strong class="text-gray-700">Secondi:</strong> ${r.secondi.join(', ') || 'Nessuno'}</p>
+              ${r.note ? `<p class="mt-1 text-xs text-gray-500">📝 ${r.note}</p>` : ''}
+            </div>
+
+            ${fotoHtml}
+
+            <div class="mt-4 pt-3 border-t border-gray-100 flex justify-between items-center text-xs">
+              <a href="${r.lat && r.lng
+                ? `https://www.google.com/maps/dir/?api=1&destination=${r.lat},${r.lng}`
+                : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(r.indirizzo)}`}"
+                 target="_blank"
+                 class="text-blue-600 underline font-medium">
+                🧭 Indicazioni Stradali
+              </a>
+              <button onclick="condividiWhatsApp(r)"
+                      class="bg-emerald-500 text-white px-3 py-1.5 rounded-lg font-semibold hover:bg-emerald-600 transition flex items-center gap-1">
+                💬 Condividi su WhatsApp
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function trovaPosizione() {
+      if (!navigator.geolocation) {
+        alert("La geolocalizzazione non è supportata dal tuo browser.");
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(position => {
+        const userLat = position.coords.latitude;
+        const userLng = position.coords.longitude;
+        map.setView([userLat, userLng], 14);
+
+        if (userMarker) map.removeLayer(userMarker);
+        userMarker = L.circleMarker([userLat, userLng], {
+          color: 'red', fillColor: '#f03', fillOpacity: 0.7, radius: 9
+        }).addTo(map).bindPopup("<b>Tu sei qui</b>").openPopup();
+
+        ristoranti.forEach(r => {
+          if (r.lat && r.lng) r.distanza = calcolaDistanzaKm(userLat, userLng, r.lat, r.lng);
+          else r.distanza = Infinity;
+        });
+        ristoranti.sort((a, b) => a.distanza - b.distanza);
+        applicaFiltriERender();
+      }, err => {
+        console.error(err);
+        alert("Impossibile recuperare la tua posizione.");
+      });
+    }
+
+    function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon / 2) ** 2;
+      return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+    }
+
+    document.getElementById("search-input").addEventListener("input", applicaFiltriERender);
+    document.getElementById("max-price-input").addEventListener("input", applicaFiltriERender);
+    document.getElementById("only-today-input").addEventListener("change", applicaFiltriERender);
+
+    window.onload = initMap;
+  </script>
+</body>
+  </html>
